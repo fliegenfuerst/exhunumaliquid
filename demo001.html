@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Quadrant Grid with URL State & Perfect Morph</title>
+<style>
+  body { margin: 0; background: #eee; font-family: sans-serif; }
+  #controls { padding: 10px; text-align: center; }
+  canvas { display: block; margin: 10px auto; background: #fff; cursor: pointer; }
+</style>
+</head>
+<body>
+<script>
+function createLabeledInput(labelText, input){
+	const wrapper = document.createElement("label");
+	wrapper.style.margin = "0 8px";
+
+	const id = `input-${Math.random().toString(36).slice(2)}`;
+	input.id = id;
+
+	wrapper.htmlFor = id;
+	wrapper.appendChild(document.createTextNode(labelText + " "));
+	wrapper.appendChild(input);
+
+	return wrapper;
+}
+function toBits(num, bits){
+	return num.toString(2).padStart(bits, "0");
+}
+class GridMorpher{
+	constructor(tileSize=80){
+		this.tileSize = tileSize;
+		this.quadSize = tileSize / 2;
+		this.containerDiv = document.createElement("div");
+		this.controlsDiv = document.createElement("div");
+		this.canvas = document.createElement("canvas");
+		this.ctx = this.canvas.getContext("2d");
+		this.gridWidthInput = document.createElement("input");
+		this.gridWidthInput.type = "number";
+		this.gridWidthInput.value = 4;
+		this.gridWidthInput.min = 1;
+		this.gridWidthInput.max = 255;
+		this.gridWidthInput.style.width = "60px";
+		this.gridHeightInput = document.createElement("input");
+		this.gridHeightInput.type = "number";
+		this.gridHeightInput.value = 4;
+		this.gridHeightInput.min = 1;
+		this.gridHeightInput.max = 255;
+		this.gridHeightInput.style.width = "60px";
+		this.generateBtn = document.createElement("button");
+		this.generateBtn.innerText = "Generate Grid";
+		this.controlsDiv.appendChild(createLabeledInput("Grid Width:", this.gridWidthInput));
+		this.controlsDiv.appendChild(createLabeledInput("Grid Height:", this.gridHeightInput));
+		this.controlsDiv.appendChild(this.generateBtn);
+		this.containerDiv.appendChild(this.controlsDiv);
+		this.containerDiv.appendChild(this.canvas);
+		document.body.appendChild(this.containerDiv);
+		this.addEventListeners();
+		this.quadRenderCanvas = document.createElement("canvas");
+		this.quadRenderCanvas.width = this.quadSize;
+		this.quadRenderCanvas.height = this.quadSize;
+		this.quadRenderCtx = this.quadRenderCanvas.getContext("2d");
+		this.grid = [];
+		this.gridWidth = 4;
+		this.gridHeight = 4;
+		this.t = 0;
+		this.dir = 1;
+		this.frameCount = 60;
+		this.spriteSheet = document.createElement("canvas");
+		this.spriteSheet.width = this.quadSize * 4;
+		this.spriteSheet.height = this.quadSize * this.frameCount;
+		this.sheetCtx = this.spriteSheet.getContext("2d");
+		this.tFrames = Array.from({ length: this.frameCount }, (_, k) => -1 + 2 * k / (this.frameCount - 1));
+		this.initDrawQuadToCtxParameters();
+		this.speed = 0.002;
+		this.resizeCanvas();
+		this.renderSpriteSheet();
+	}
+	addEventListeners(){
+		window.addEventListener("hashchange", () => {
+			if(location.hash.startsWith("#!")) this.decodeState(location.hash.slice(2));
+		});
+		this.generateBtn.addEventListener("click", () => {
+			this.generateGrid();
+		});
+		this.canvas.addEventListener("mousedown", (e) => {
+			const rect = this.canvas.getBoundingClientRect();
+			const x = e.clientX - rect.left;
+			const y = e.clientY - rect.top;
+			const col = Math.floor(x / this.tileSize);
+			const row = Math.floor(y / this.tileSize);
+			if(row >= this.gridHeight || col >= this.gridWidth) return;
+			const tile = this.grid[row][col];
+			const lx = x - col * this.tileSize;
+			const ly = y - row * this.tileSize;
+			let qi;
+			if(lx < this.quadSize && ly < this.quadSize) qi = 0;
+			else if(lx >= this.quadSize && ly < this.quadSize) qi = 1;
+			else if(lx < this.quadSize && ly >= this.quadSize) qi = 2;
+			else qi = 3;
+			if(e.button === 0){
+				tile[qi].rotation = (tile[qi].rotation + 90) % 360;
+			}
+			else if(e.button === 2){
+				tile[qi].rotation = (tile[qi].rotation + 270) % 360;
+			}
+			this.drawGridFromSprite();
+			this.updateURL();
+		});
+		this.canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+	}
+	renderSpriteSheet(){
+		this.sheetCtx.setTransform(1, 0, 0, 1, 0, 0);
+		this.sheetCtx.clearRect(0, 0, this.spriteSheet.width, this.spriteSheet.height);
+		this.quadRenderCanvas.width = this.quadSize;
+		this.quadRenderCanvas.height = this.quadSize;
+		for(let f = 0; f < this.frameCount; f++){
+			this.quadRenderCtx.setTransform(1, 0, 0, 1, 0, 0);
+			this.quadRenderCtx.clearRect(0, 0, this.quadSize, this.quadSize);
+			this.drawQuadToCtx(f);
+			for(let r = 0; r < 4; r++){
+				this.sheetCtx.save();
+				this.sheetCtx.translate(
+					r * this.quadSize + this.quadSize / 2,
+					f * this.quadSize + this.quadSize / 2
+				);
+				this.sheetCtx.rotate(r * Math.PI / 2);
+				this.sheetCtx.drawImage(
+					this.quadRenderCanvas,
+					-this.quadSize / 2,
+					-this.quadSize / 2
+				);
+				this.sheetCtx.restore();
+			}
+		}
+	}
+	initDrawQuadToCtxParameters(){
+		this.x0 = 0;
+		this.y0 = 0;
+		this.x1 = this.quadSize;
+		this.y1 = this.quadSize;
+		this.dx = this.x1 - this.x0;
+		this.dy = this.y1 - this.y0;
+		this.len = Math.sqrt(this.dx * this.dx + this.dy * this.dy);
+		this.px = -this.dy / this.len;
+		this.py = this.dx / this.len;
+	}
+	drawQuadToCtx(tVal){
+		this.quadRenderCtx.fillStyle = "black";
+		this.quadRenderCtx.fillRect(0, 0, this.x1, this.y1);
+		this.quadRenderCtx.fillStyle = "white";
+		this.quadRenderCtx.beginPath();
+		const offset = (this.y1 * Math.SQRT2 / 2) * this.tFrames[tVal];
+		const cx = (this.x0 + this.x1) / 2 + this.px * offset;
+		const cy = (this.y0 + this.y1) / 2 + this.py * offset;
+		this.quadRenderCtx.moveTo(this.x0, this.y0);
+		this.quadRenderCtx.quadraticCurveTo(cx, cy, this.x1, this.y1);
+		this.quadRenderCtx.lineTo(this.x1, this.y1);
+		this.quadRenderCtx.lineTo(0, this.y1);
+		this.quadRenderCtx.closePath();
+		this.quadRenderCtx.fill();
+	}
+	createTile(){
+		return [
+			{rotation: 0},
+			{rotation: 90},
+			{rotation: 270},
+			{rotation: 180}
+		];
+	}
+	generateGrid(){
+		this.gridWidth = parseInt(this.gridWidthInput.value);
+		this.gridHeight = parseInt(this.gridHeightInput.value);
+		this.grid.length = 0;
+		for(let r = 0; r < this.gridHeight; r++){
+			const row = [];
+			for(let c = 0; c < this.gridWidth; c++){
+				row.push(this.createTile());
+			}
+			this.grid.push(row);
+		}
+		this.resizeCanvas();
+		this.renderSpriteSheet();
+		this.drawGridFromSprite();
+		this.updateURL();
+	}
+	getFrameIndex(){
+		return Math.floor(((this.t + 1) / 2) * (this.frameCount - 1));
+	}
+	resizeCanvas(){
+		this.canvas.width = this.gridWidth * this.tileSize;
+		this.canvas.height = this.gridHeight * this.tileSize;
+	}
+	drawGridFromSprite(){
+		this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+		for(let r = 0; r < this.gridHeight; r++){
+			for(let c = 0; c < this.gridWidth; c++){
+				const tile = this.grid[r][c];
+				for(let i = 0; i < 4; i++){
+					const quad = tile[i];
+					const dx = c * this.tileSize + (i % 2) * this.quadSize;
+					const dy = r * this.tileSize + Math.floor(i / 2) * this.quadSize;
+					const rotIndex = (quad.rotation / 90) | 0;
+					const sx = rotIndex * this.quadSize;
+					const sy = this.getFrameIndex() * this.quadSize;
+					this.ctx.drawImage(
+						this.spriteSheet,
+						sx, sy,
+						this.quadSize, this.quadSize,
+						dx, dy,
+						this.quadSize, this.quadSize
+					);
+				}
+			}
+		}
+	}
+	encodeState(){
+		let bits = "";
+		bits += toBits(this.gridWidth, 8);
+		bits += toBits(this.gridHeight, 8);
+		for(let r = 0; r < this.gridHeight; r++){
+			for(let c = 0; c < this.gridWidth; c++){
+				for(let q of this.grid[r][c]) bits += toBits(q.rotation / 90, 2);
+			}
+		}
+		while(bits.length % 8 !== 0) bits += "0";
+		const bytes = [];
+		for(let i = 0; i < bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
+		return btoa(String.fromCharCode(...bytes));
+	}
+	decodeState(str){
+		try{
+			const binary = atob(str);
+			let bits = "";
+			for(let i = 0; i < binary.length; i++) bits += binary.charCodeAt(i).toString(2).padStart(8, "0");
+			let idx = 0;
+			const read = (n) => {
+				const value = bits.slice(idx, idx + n);
+				idx += n;
+				return parseInt(value, 2);
+			};
+			this.gridWidth = read(8);
+			this.gridHeight = read(8);
+			this.grid.length = 0;
+			for(let r = 0; r < this.gridHeight; r++){
+				const row = [];
+				for(let c = 0; c < this.gridWidth; c++){
+					const tile = [];
+					for(let i = 0; i < 4; i++){
+						const rot = read(2);
+						tile.push({rotation: rot * 90});
+					}
+					row.push(tile);
+				}
+				this.grid.push(row);
+			}
+			this.gridWidthInput.value = this.gridWidth;
+			this.gridHeightInput.value = this.gridHeight;
+			this.resizeCanvas();
+			this.renderSpriteSheet();
+			this.drawGridFromSprite();
+		}catch(e){
+			console.warn("Invalid URL state");
+		}
+	}
+	updateURL(){
+		location.hash = "!" + this.encodeState();
+	}
+	update(dt){
+		this.t += this.speed * dt * this.dir;
+		if(this.t > 1){
+			this.t = 1;
+			this.dir = -1;
+		}
+		if(this.t < -1){
+			this.t = -1;
+			this.dir = 1;
+		}
+		this.drawGridFromSprite();
+	}
+}
+const gridMorpher = new GridMorpher();
+if(location.hash.startsWith("#!")){
+	gridMorpher.decodeState(location.hash.slice(2));
+}else{
+	gridMorpher.generateGrid();
+}
+let lastTime = performance.now();
+function animate(now){
+	const dt = now - lastTime;
+	lastTime = now;
+	gridMorpher.update(dt);
+	requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
