@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Laser Diffraction Simulation Synced to BPM</title>
+<style>
+  body { margin: 0; background: #000; overflow: hidden; color: #fff; font-family: sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #ui {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    background: rgba(0,0,0,0.5);
+    padding: 10px;
+    border-radius: 8px;
+  }
+  label { display: block; margin-top: 5px; }
+  input[type=range], select, input[type=number] { width: 150px; }
+</style>
+</head>
+<body>
+
+<canvas id="glcanvas"></canvas>
+
+<div id="ui">
+  <label>Number of Slits: <span id="slitsVal">3</span>
+    <input id="slits" type="range" min="1" max="10" value="3">
+  </label>
+  <label>Slit Spacing: <span id="spacingVal">0.1</span>
+    <input id="spacing" type="range" min="0.05" max="0.5" step="0.01" value="0.1">
+  </label>
+  <label>Wavelength (Frequency): <span id="freqVal">50</span>
+    <input id="freq" type="range" min="10" max="200" value="50">
+  </label>
+  <label>Ring Amplitude: <span id="ampVal">0.8</span>
+    <input id="amp" type="range" min="0" max="1" step="0.01" value="0.8">
+  </label>
+  <label>Speckle Intensity: <span id="speckVal">0.2</span>
+    <input id="speck" type="range" min="0" max="1" step="0.01" value="0.2">
+  </label>
+  <label>BPM (sync pattern to beat): <span id="bpmVal">120</span>
+    <input id="bpm" type="number" min="30" max="300" step="1" value="120">
+  </label>
+  <label>Slit Arrangement:
+    <select id="arrangement">
+      <option value="0">Linear</option>
+      <option value="1">Circle</option>
+      <option value="2">Grid</option>
+      <option value="3">Random</option>
+    </select>
+  </label>
+  <label>Color Scheme:
+    <select id="colorScheme">
+      <option value="0">Grayscale</option>
+      <option value="1">Red-Blue</option>
+      <option value="2">Rainbow</option>
+      <option value="3">Fire</option>
+    </select>
+  </label>
+  <label>Zoom: <span id="zoomVal">1.0</span>
+  <input id="zoom" type="range" min="0.2" max="5" step="0.01" value="1.0">
+</label>
+
+  <span>click Spacebutton to hide</span>
+</div>
+
+<script type="text/javascript">
+// ---- URL state helpers (hash-based, local-friendly) ----
+const SETTINGS = {
+  slits:      () => slitsSlider.value,
+  spacing:    () => spacingSlider.value,
+  freq:       () => freqSlider.value,
+  amp:        () => ampSlider.value,
+  speck:      () => speckSlider.value,
+  bpm:        () => bpmInput.value,
+  arrangement:() => arrangementSelect.value,
+  color:      () => colorSchemeSelect.value,
+};
+
+function writeSettingsToURL() {
+  const params = new URLSearchParams();
+  for (const key in SETTINGS) {
+    params.set(key, SETTINGS[key]());
+  }
+  location.hash = params.toString();
+}
+
+function readSettingsFromURL() {
+  if (!location.hash) return;
+  const params = new URLSearchParams(location.hash.substring(1));
+
+  function apply(id, value) {
+    if (value === null) return;
+    const el = document.getElementById(id);
+    el.value = value;
+    el.dispatchEvent(new Event('input'));
+    el.dispatchEvent(new Event('change'));
+  }
+
+  apply('slits', params.get('slits'));
+  apply('spacing', params.get('spacing'));
+  apply('freq', params.get('freq'));
+  apply('amp', params.get('amp'));
+  apply('speck', params.get('speck'));
+  apply('bpm', params.get('bpm'));
+  apply('arrangement', params.get('arrangement'));
+  apply('colorScheme', params.get('color'));
+  apply('zoom', params.get('zoom'));
+
+}
+
+// Canvas & WebGL setup
+const canvas = document.getElementById('glcanvas');
+const gl = canvas.getContext('webgl2');
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+// Vertex shader
+const vsSource = `#version 300 es
+in vec2 aPosition;
+out vec2 vUV;
+void main() {
+    vUV = aPosition * 0.5 + 0.5;
+    gl_Position = vec4(aPosition, 0.0, 1.0);
+}`;
+
+// Fragment shader
+const fsSource = `#version 300 es
+precision highp float;
+in vec2 vUV;
+out vec4 fragColor;
+
+uniform float uAspect;
+uniform int uSlits;
+uniform float uSpacing;
+uniform float uFrequency;
+uniform float uAmplitude;
+uniform float uSpeckle;
+uniform float uScale;
+uniform float uTime;
+uniform int uArrangement; // 0=line, 1=circle, 2=grid, 3=random
+uniform int uColorScheme; // 0=gray,1=redblue,2=rainbow,3=fire
+
+
+float rand(vec2 co){ return fract(sin(dot(co.xy,vec2(12.9898,78.233)))*43758.5453); }
+
+vec3 applyColor(float intensity, int scheme){
+    if(scheme==0){ return vec3(intensity); }
+    else if(scheme==1){ return vec3(intensity,0.0,1.0-intensity); }
+    else if(scheme==2){
+        float r = 0.5 + 0.5*sin(6.2831*intensity);
+        float g = 0.5 + 0.5*sin(6.2831*intensity + 2.094);
+        float b = 0.5 + 0.5*sin(6.2831*intensity + 4.188);
+        return vec3(r,g,b);
+    }
+    else if(scheme==3){ return vec3(intensity, intensity*intensity, 0.0); }
+    return vec3(intensity);
+}
+
+void main() {
+    vec2 center = vec2(0.5,0.5);
+    vec2 pos = (vUV - center) * uScale;
+    pos.x *= uAspect;
+
+    float wave = 0.0;
+    for(int i=0;i<10;i++){
+        if(i >= uSlits) break;
+        vec2 slitPos = vec2(0.0);
+        if(uArrangement == 0){
+            slitPos = vec2((float(i)-float(uSlits-1)/2.0)*uSpacing,0.0);
+        } else if(uArrangement == 1){
+            float angle = float(i)/float(uSlits)*6.283185;
+            slitPos = vec2(cos(angle), sin(angle)) * uSpacing * float(uSlits) * 0.3;
+        } else if(uArrangement == 2){
+            int cols = int(ceil(sqrt(float(uSlits))));
+            int row = i / cols;
+            int col = i % cols;
+            slitPos = vec2((float(col)-float(cols-1)/2.0)*uSpacing,
+                           (float(row)-float(cols-1)/2.0)*uSpacing);
+        } else if(uArrangement == 3){
+            slitPos = vec2(rand(vec2(float(i),0.0))*2.0-1.0,
+                           rand(vec2(float(i),1.0))*2.0-1.0)
+                      * uSpacing * float(uSlits) * 0.5;
+        }
+        float r = length(pos - slitPos);
+        wave += cos(uFrequency * r - uTime);
+    }
+    wave /= float(uSlits);
+
+    float speckle = rand(vUV*100.0);
+    float intensity = wave*uAmplitude + speckle*uSpeckle;
+    intensity = intensity*0.5 + 0.5;
+
+    fragColor = vec4(applyColor(intensity, uColorScheme),1.0);
+}`;
+
+// Compile helpers
+function compileShader(source,type){
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader,source);
+    gl.compileShader(shader);
+    if(!gl.getShaderParameter(shader, gl.COMPILE_STATUS))
+        console.error(gl.getShaderInfoLog(shader));
+    return shader;
+}
+
+// Program setup
+const vertexShader = compileShader(vsSource,gl.VERTEX_SHADER);
+const fragmentShader = compileShader(fsSource,gl.FRAGMENT_SHADER);
+const program = gl.createProgram();
+gl.attachShader(program,vertexShader);
+gl.attachShader(program,fragmentShader);
+gl.linkProgram(program);
+if(!gl.getProgramParameter(program, gl.LINK_STATUS))
+    console.error(gl.getProgramInfoLog(program));
+gl.useProgram(program);
+
+// Fullscreen quad
+const quadVerts = new Float32Array([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]);
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+const vbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER,vbo);
+gl.bufferData(gl.ARRAY_BUFFER,quadVerts,gl.STATIC_DRAW);
+const posLoc = gl.getAttribLocation(program,'aPosition');
+gl.enableVertexAttribArray(posLoc);
+gl.vertexAttribPointer(posLoc,2,gl.FLOAT,false,0,0);
+
+// Uniforms
+const uSlits = gl.getUniformLocation(program,'uSlits');
+const uSpacing = gl.getUniformLocation(program,'uSpacing');
+const uFrequency = gl.getUniformLocation(program,'uFrequency');
+const uAmplitude = gl.getUniformLocation(program,'uAmplitude');
+const uSpeckle = gl.getUniformLocation(program,'uSpeckle');
+const uScale = gl.getUniformLocation(program,'uScale');
+const uTime = gl.getUniformLocation(program,'uTime');
+const uArrangement = gl.getUniformLocation(program,'uArrangement');
+const uAspect = gl.getUniformLocation(program,'uAspect');
+const uColorScheme = gl.getUniformLocation(program,'uColorScheme');
+const zoomSlider = document.getElementById('zoom');
+const zoomVal = document.getElementById('zoomVal');
+
+zoomSlider.oninput = () => {
+  const scale = parseFloat(zoomSlider.value);
+  zoomVal.textContent = scale.toFixed(2);
+  gl.uniform1f(uScale, scale);
+  writeSettingsToURL();
+};
+
+// Include zoom in the URL settings
+SETTINGS.zoom = () => zoomSlider.value;
+
+// Init uniforms
+gl.uniform1i(uSlits,3);
+gl.uniform1f(uSpacing,0.1);
+gl.uniform1f(uFrequency,50.0);
+gl.uniform1f(uAmplitude,0.8);
+gl.uniform1f(uSpeckle,0.2);
+gl.uniform1f(uScale,1.0);
+gl.uniform1i(uArrangement,0);
+gl.uniform1i(uColorScheme,0);
+gl.uniform1f(uAspect, canvas.width / canvas.height);
+
+// UI elements
+const slitsSlider = document.getElementById('slits');
+const slitsVal = document.getElementById('slitsVal');
+const spacingSlider = document.getElementById('spacing');
+const spacingVal = document.getElementById('spacingVal');
+const freqSlider = document.getElementById('freq');
+const freqVal = document.getElementById('freqVal');
+const ampSlider = document.getElementById('amp');
+const ampVal = document.getElementById('ampVal');
+const speckSlider = document.getElementById('speck');
+const speckVal = document.getElementById('speckVal');
+const bpmInput = document.getElementById('bpm');
+const bpmVal = document.getElementById('bpmVal');
+const arrangementSelect = document.getElementById('arrangement');
+const colorSchemeSelect = document.getElementById('colorScheme');
+
+slitsSlider.oninput = () => {
+  slitsVal.textContent = slitsSlider.value;
+  gl.uniform1i(uSlits, parseInt(slitsSlider.value));
+  writeSettingsToURL();
+};
+
+spacingSlider.oninput = () => {
+  spacingVal.textContent = spacingSlider.value;
+  gl.uniform1f(uSpacing, parseFloat(spacingSlider.value));
+  writeSettingsToURL();
+};
+
+freqSlider.oninput = () => {
+  freqVal.textContent = freqSlider.value;
+  gl.uniform1f(uFrequency, parseFloat(freqSlider.value));
+  writeSettingsToURL();
+};
+
+ampSlider.oninput = () => {
+  ampVal.textContent = ampSlider.value;
+  gl.uniform1f(uAmplitude, parseFloat(ampSlider.value));
+  writeSettingsToURL();
+};
+
+speckSlider.oninput = () => {
+  speckVal.textContent = speckSlider.value;
+  gl.uniform1f(uSpeckle, parseFloat(speckSlider.value));
+  writeSettingsToURL();
+};
+
+arrangementSelect.onchange = () => {
+  gl.uniform1i(uArrangement, parseInt(arrangementSelect.value));
+  writeSettingsToURL();
+};
+
+colorSchemeSelect.onchange = () => {
+  gl.uniform1i(uColorScheme, parseInt(colorSchemeSelect.value));
+  writeSettingsToURL();
+};
+
+// Unified BPM handler
+function handleBPMChange() {
+    const bpm = parseFloat(bpmInput.value) || 120; // fallback
+    bpmVal.textContent = bpm;
+    const speed = 2 * Math.PI * bpm / 60;
+    uSpeedFactor = speed;
+    writeSettingsToURL();
+}
+
+// Fire on typing, losing focus, or pressing Enter
+bpmInput.addEventListener('input', handleBPMChange);
+bpmInput.addEventListener('change', handleBPMChange);
+bpmInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === 'Tab') {
+        handleBPMChange();
+    }
+});
+
+
+// BPM → uSpeed calculation
+function updateSpeedFromBPM(){
+    const bpm = parseFloat(bpmInput.value) || 120; // fallback if empty
+    bpmVal.textContent = bpm;
+    const speed = 2 * Math.PI * bpm / 60;
+    uSpeedFactor = speed;
+}
+
+let uSpeedFactor = 2 * Math.PI * 120 / 60; // initial 120 BPM
+updateSpeedFromBPM();
+bpmInput.oninput = updateSpeedFromBPM;
+
+// Render loop
+let startTime = performance.now();
+function render(){
+    const t = (performance.now() - startTime)*0.001;
+    gl.uniform1f(uTime, t * uSpeedFactor);
+    gl.viewport(0,0,canvas.width,canvas.height);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.TRIANGLES,0,6);
+    requestAnimationFrame(render);
+}
+render();
+
+// Resize
+function resizeCanvas(){
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    gl.viewport(0,0,canvas.width,canvas.height);
+    gl.uniform1f(uAspect, canvas.width / canvas.height);
+}
+
+// ---- Toggle UI overlay with Space key ----
+const uiDiv = document.getElementById('ui');
+let uiVisible = true;
+
+window.addEventListener('keydown', (e) => {
+    // Only toggle on Space, avoid scrolling
+    if (e.code === 'Space') {
+        e.preventDefault();
+        uiVisible = !uiVisible;
+        uiDiv.style.display = uiVisible ? 'block' : 'none';
+    }
+});
+
+
+
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+readSettingsFromURL();
+writeSettingsToURL(); // ensures hash exists even on first load
+
+</script>
+</body>
+</html>
