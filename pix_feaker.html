@@ -380,8 +380,14 @@ if(type === 'orig') {
 			els.status.textContent = "Ready to process.";
 		}
 	}
-	els.fileOrig.onchange = (e) => loadAudio(e.target.files[0], 'orig', els.labelOrig);
-	els.fileInst.onchange = (e) => loadAudio(e.target.files[0], 'inst', els.labelInst);
+	els.fileOrig.onchange = (e) => {
+		els.processBtn.disabled = true; 
+		loadAudio(e.target.files[0], 'orig', els.labelOrig);
+	};
+	els.fileInst.onchange = (e) => {
+		els.processBtn.disabled = true;
+		loadAudio(e.target.files[0], 'inst', els.labelInst);
+	};
 
 
 	els.processBtn.onclick = async () => {
@@ -467,6 +473,7 @@ if(type === 'orig') {
 	els.playBtn.onclick = () => {
 		if (sourceNode) {
 			sourceNode.stop();
+			sourceNode.disconnect(); // <--- ADD THIS
 			els.playBtn.textContent = "Play Result";
 			sourceNode = null;
 			return;
@@ -479,27 +486,28 @@ if(type === 'orig') {
 		
 		sourceNode.onended = () => {
 			els.playBtn.textContent = "Play Result";
+            if (sourceNode) sourceNode.disconnect(); // <--- ADD THIS
 			sourceNode = null;
 		};
 	};
-els.exportBtn.onclick = () => {
-	const wavBlob = AudioExporter.audioBufferToWavBlob(outputBuffer);
-	AudioExporter.downloadBlob(
-		wavBlob,
-		`${originalFilename}_processed.wav`
-	);
-};
-els.exportMp3Btn.onclick = () => {
-	const mp3Blob =
-		AudioExporter.audioBufferToMp3Blob(
-			outputBuffer,
-			320
+	els.exportBtn.onclick = () => {
+		const wavBlob = AudioExporter.audioBufferToWavBlob(outputBuffer);
+		AudioExporter.downloadBlob(
+			wavBlob,
+			`${originalFilename}_processed.wav`
 		);
-	AudioExporter.downloadBlob(
-		mp3Blob,
-		`${originalFilename}_processed.mp3`
-	);
-};
+	};
+	els.exportMp3Btn.onclick = () => {
+		const mp3Blob =
+			AudioExporter.audioBufferToMp3Blob(
+				outputBuffer,
+				320
+			);
+		AudioExporter.downloadBlob(
+			mp3Blob,
+			`${originalFilename}_processed.mp3`
+		);
+	};
 	function drawWaveform(buffer, canvas, ctx) {
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
 		const data = buffer.getChannelData(0);
