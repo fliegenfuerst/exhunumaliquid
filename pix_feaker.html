@@ -201,11 +201,13 @@ class AudioExporter {
 			44 + length * numChannels * 4
 		);
 		const view = new DataView(wav);
+		
 		const writeStr = (offset, str) => {
 			for (let i = 0; i < str.length; i++) {
 				view.setUint8(offset + i, str.charCodeAt(i));
 			}
 		};
+		
 		writeStr(0, "RIFF");
 		view.setUint32(
 			4,
@@ -235,17 +237,25 @@ class AudioExporter {
 			length * numChannels * 4,
 			true
 		);
+
+		// --- PERFORMANCE FIX: Cache channel arrays outside the loop ---
+		const channelData = [];
+		for (let ch = 0; ch < numChannels; ch++) {
+			channelData.push(audioBuffer.getChannelData(ch));
+		}
+
 		let offset = 44;
 		for (let i = 0; i < length; i++) {
 			for (let ch = 0; ch < numChannels; ch++) {
 				view.setFloat32(
 					offset,
-					audioBuffer.getChannelData(ch)[i],
+					channelData[ch][i], // Reference the cached array
 					true
 				);
 				offset += 4;
 			}
 		}
+		
 		return new Blob(
 			[view],
 			{ type: "audio/wav" }
